@@ -1,0 +1,5 @@
+node_modules/
+sessions/
+uploads/
+templates.json
+.DS_Store

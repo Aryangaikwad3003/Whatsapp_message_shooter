@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>WhatsApp Broadcast Tool</title>
+  <style>
+    body { font-family: sans-serif; margin: 2rem; max-width: 800px; }
+    section { margin-bottom: 2rem; padding: 1rem; border: 1px solid #ccc; border-radius: 4px; }
+    .hidden { display: none; }
+    #qr-container img { max-width: 250px; }
+    .progress-bar-container { width: 100%; background: #eee; height: 20px; border-radius: 10px; overflow: hidden; margin: 10px 0; }
+    .progress-bar { height: 100%; background: #4caf50; width: 0%; transition: width 0.2s; }
+    .log-item { font-size: 0.9em; margin-bottom: 4px; padding: 4px; border-bottom: 1px solid #eee; }
+    .log-item.sent { color: green; }
+    .log-item.failed { color: red; }
+    .log-item.invalid { color: orange; }
+    button { padding: 8px 12px; cursor: pointer; }
+    input, textarea, select { width: 100%; padding: 8px; margin-bottom: 10px; box-sizing: border-box; }
+    textarea { height: 100px; }
+  </style>
+</head>
+<body>
+  <h1>WhatsApp Broadcast Tool</h1>
+
+  <!-- Auth Section -->
+  <section id="auth-section">
+    <h2>1. WhatsApp Connection</h2>
+    <p>Status: <span id="auth-status">DISCONNECTED</span></p>
+    <button id="btn-init">Start Session</button>
+    <button id="btn-logout" class="hidden">Logout</button>
+    <div id="qr-container" class="hidden">
+      <p>Scan this QR code with your WhatsApp app:</p>
+      <img id="qr-img" alt="WhatsApp QR Code" />
+    </div>
+  </section>
+
+  <!-- Upload Section -->
+  <section id="upload-section">
+    <h2>2. Upload Contacts</h2>
+    <input type="file" id="file-input" accept=".xlsx" />
+    <button id="btn-upload">Upload Excel</button>
+    <div id="upload-info" class="hidden">
+      <p>Uploaded! Rows: <span id="upload-rows"></span></p>
+      <p>Headers: <span id="upload-headers"></span></p>
+    </div>
+  </section>
+
+  <!-- Templates Section -->
+  <section id="template-section">
+    <h2>3. Message Template</h2>
+    <p>Use {ColumnName} for placeholders. Example: Hello {Name}!</p>
+    <select id="template-select"><option value="">-- Select or Create New --</option></select>
+    <div id="template-form">
+      <input type="text" id="tpl-name" placeholder="Template Name" />
+      <textarea id="tpl-body" placeholder="Message body with {Placeholders}..."></textarea>
+      <button id="btn-save-tpl">Save Template</button>
+    </div>
+  </section>
+
+  <!-- Broadcast Setup -->
+  <section id="broadcast-setup">
+    <h2>4. Start Broadcast</h2>
+    <label>Phone Number Column:</label>
+    <select id="phone-col"></select>
+    
+    <div style="margin-top: 15px; display: flex; gap: 10px; align-items: center;">
+      <div>
+        <label>Min Delay (minutes):</label>
+        <input type="number" id="delay-min" value="1" min="0" step="0.5" oninput="calculateETA()" />
+      </div>
+      <div>
+        <label>Max Delay (minutes):</label>
+        <input type="number" id="delay-max" value="3" min="0" step="0.5" oninput="calculateETA()" />
+      </div>
+    </div>
+    
+    <p id="eta-text" style="font-weight: bold; color: #555;"></p>
+    
+    <button id="btn-start">Start Broadcast</button>
+  </section>
+
+  <!-- Live Progress -->
+  <section id="progress-section" class="hidden">
+    <h2>Broadcast Progress</h2>
+    <p>State: <span id="bc-state"></span></p>
+    <p>Sent: <span id="bc-sent">0</span> | Failed: <span id="bc-failed">0</span> | Invalid: <span id="bc-invalid">0</span> / <span id="bc-total">0</span></p>
+    <div class="progress-bar-container"><div id="progress-bar" class="progress-bar"></div></div>
+    <p id="countdown-text"></p>
+    <div>
+      <button id="btn-pause">Pause</button>
+      <button id="btn-resume">Resume</button>
+      <button id="btn-cancel">Cancel</button>
+    </div>
+    <h3>Logs</h3>
+    <div id="logs" style="max-height: 200px; overflow-y: auto;"></div>
+  </section>
+
+  <script>
+    let currentUploadId = null;
+    let currentTemplateId = null;
+    let currentBroadcastId = null;
+
+    // SSE Setup
+    const authSource = new EventSource('/api/auth/stream');
+    authSource.onmessage = (e) => {
+      const data = JSON.parse(e.data);
+      document.getElementById('auth-status').innerText = data.status;
+      if (data.status === 'QR_READY' && data.qr) {
+        document.getElementById('qr-container').classList.remove('hidden');
+        document.getElementById('qr-img').src = data.qr;
+      } else {
+        document.getElementById('qr-container').classList.add('hidden');
+      }
+      if (data.status === 'READY' || data.status === 'AUTHENTICATED') {
+        document.getElementById('btn-init').classList.add('hidden');
+        document.getElementById('btn-logout').classList.remove('hidden');
+      } else {
+        document.getElementById('btn-init').classList.remove('hidden');
+        document.getElementById('btn-logout').classList.add('hidden');
+      }
+    };
+
+    document.getElementById('btn-init').onclick = () => fetch('/api/auth/init', { method: 'POST' });
+    document.getElementById('btn-logout').onclick = async () => {
+      if (!confirm('Are you sure you want to log out and disconnect this WhatsApp account?')) return;
+      
+      const btn = document.getElementById('btn-logout');
+      btn.innerText = 'Logging out...';
+      btn.disabled = true;
+      
+      await fetch('/api/auth/logout', { method: 'POST' });
+      
+      btn.innerText = 'Logout';
+      btn.disabled = false;
+    };
+
+    // Upload
+    document.getElementById('btn-upload').onclick = async () => {
+      const file = document.getElementById('file-input').files[0];
+      if (!file) return alert('Select file');
+      const fd = new FormData();
+      fd.append('file', file);
+      const res = await fetch('/api/upload', { method: 'POST', body: fd });
+      const data = await res.json();
+      if (data.error) return alert(data.error);
+      currentUploadId = data.uploadId;
+      document.getElementById('upload-info').classList.remove('hidden');
+      document.getElementById('upload-rows').innerText = data.rowCount;
+      document.getElementById('upload-headers').innerText = data.headers.join(', ');
+      
+      const phoneCol = document.getElementById('phone-col');
+      phoneCol.innerHTML = data.headers.map(h => `<option value="${h}">${h}</option>`).join('');
+      loadTemplates();
+      calculateETA();
+    };
+
+    // Templates
+    async function loadTemplates() {
+      const res = await fetch(`/api/templates${currentUploadId ? '?uploadId='+currentUploadId : ''}`);
+      const tpls = await res.json();
+      const sel = document.getElementById('template-select');
+      sel.innerHTML = '<option value="">-- Create New --</option>' + 
+        tpls.map(t => `<option value="${t.id}">${t.name} ${t.matchesHeaders===false ? '(Missing cols)' : ''}</option>`).join('');
+    }
+    
+    document.getElementById('template-select').onchange = async (e) => {
+      const id = e.target.value;
+      currentTemplateId = id || null;
+      if (!id) {
+        document.getElementById('tpl-name').value = '';
+        document.getElementById('tpl-body').value = '';
+      } else {
+        const res = await fetch(`/api/templates/${id}`);
+        const tpl = await res.json();
+        document.getElementById('tpl-name').value = tpl.name;
+        document.getElementById('tpl-body').value = tpl.body;
+      }
+    };
+
+    document.getElementById('btn-save-tpl').onclick = async () => {
+      const name = document.getElementById('tpl-name').value;
+      const body = document.getElementById('tpl-body').value;
+      const method = currentTemplateId ? 'PUT' : 'POST';
+      const url = currentTemplateId ? `/api/templates/${currentTemplateId}` : '/api/templates';
+      
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, body })
+      });
+      const data = await res.json();
+      currentTemplateId = data.id;
+      loadTemplates();
+      alert('Saved!');
+    };
+
+    // Broadcast
+    let countdownInterval;
+    const eventsSource = new EventSource('/api/events/stream');
+    eventsSource.onmessage = (e) => {
+      const msg = JSON.parse(e.data);
+      if (msg.type === 'broadcast_progress' && msg.data.id === currentBroadcastId) {
+        updateProgressUI(msg.data);
+      }
+    };
+
+    function updateProgressUI(data) {
+      document.getElementById('progress-section').classList.remove('hidden');
+      document.getElementById('bc-state').innerText = data.status;
+      document.getElementById('bc-sent').innerText = data.sentCount;
+      document.getElementById('bc-failed').innerText = data.failedCount;
+      document.getElementById('bc-invalid').innerText = data.invalidCount;
+      document.getElementById('bc-total').innerText = data.total;
+      
+      const pct = (data.currentIndex / data.total) * 100;
+      document.getElementById('progress-bar').style.width = pct + '%';
+
+      if (data.status === 'RUNNING' && data.waitingMs > 0) {
+        let ms = data.waitingMs;
+        if (countdownInterval) clearInterval(countdownInterval);
+        countdownInterval = setInterval(() => {
+          ms -= 1000;
+          if (ms <= 0) {
+            clearInterval(countdownInterval);
+            document.getElementById('countdown-text').innerText = 'Sending next...';
+          } else {
+            document.getElementById('countdown-text').innerText = `Waiting ${Math.ceil(ms/1000)}s...`;
+          }
+        }, 1000);
+      } else {
+        if (countdownInterval) clearInterval(countdownInterval);
+        document.getElementById('countdown-text').innerText = '';
+      }
+
+      // Render logs
+      const logs = document.getElementById('logs');
+      logs.innerHTML = '';
+      data.rows.slice(0, data.currentIndex).reverse().forEach(r => {
+        const div = document.createElement('div');
+        div.className = 'log-item ' + r.__status.toLowerCase();
+        div.innerText = `Row ${r.__index+1}: ${r.__status} ${r.__error ? '- ' + r.__error : ''}`;
+        logs.appendChild(div);
+      });
+    }
+
+    // Broadcast Setup & ETA
+    function calculateETA() {
+      if (!currentUploadId) {
+        document.getElementById('eta-text').innerText = '';
+        return;
+      }
+      const totalRows = parseInt(document.getElementById('upload-rows').innerText) || 0;
+      const minDelay = parseFloat(document.getElementById('delay-min').value) || 0;
+      const maxDelay = parseFloat(document.getElementById('delay-max').value) || 0;
+      
+      if (totalRows === 0) return;
+      
+      const avgDelay = (minDelay + maxDelay) / 2;
+      const totalMinutes = totalRows * avgDelay;
+      
+      const hours = Math.floor(totalMinutes / 60);
+      const mins = Math.floor(totalMinutes % 60);
+      
+      document.getElementById('eta-text').innerText = `Estimated Total Time for ${totalRows} messages: ~${hours}h ${mins}m`;
+    }
+
+    document.getElementById('btn-start').onclick = async () => {
+      if (!currentUploadId || !currentTemplateId) return alert('Need upload and template');
+      const phoneColumn = document.getElementById('phone-col').value;
+      const minDelay = parseFloat(document.getElementById('delay-min').value);
+      const maxDelay = parseFloat(document.getElementById('delay-max').value);
+      
+      if (minDelay > maxDelay) return alert('Min delay cannot be greater than Max delay!');
+      
+      const res = await fetch('/api/broadcast/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ uploadId: currentUploadId, templateId: currentTemplateId, phoneColumn, minDelay, maxDelay })
+      });
+      const data = await res.json();
+      if (data.error) return alert(data.error);
+      currentBroadcastId = data.broadcastId;
+    };
+
+    document.getElementById('btn-pause').onclick = () => fetch(`/api/broadcast/${currentBroadcastId}/pause`, { method: 'POST' });
+    document.getElementById('btn-resume').onclick = () => fetch(`/api/broadcast/${currentBroadcastId}/resume`, { method: 'POST' });
+    document.getElementById('btn-cancel').onclick = () => fetch(`/api/broadcast/${currentBroadcastId}/cancel`, { method: 'POST' });
+    
+    // On load
+    loadTemplates();
+  </script>
+</body>
+</html>
