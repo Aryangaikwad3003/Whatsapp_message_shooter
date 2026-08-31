@@ -90,6 +90,7 @@
       <button id="btn-pause">Pause</button>
       <button id="btn-resume">Resume</button>
       <button id="btn-cancel">Cancel</button>
+      <button id="btn-export-failed" class="hidden" style="margin-left: 20px; background-color: #ff9800; color: white; border: none;">Export Failed to Excel</button>
     </div>
     <h3>Logs</h3>
     <div id="logs" style="max-height: 200px; overflow-y: auto;"></div>
@@ -232,6 +233,14 @@
         document.getElementById('countdown-text').innerText = '';
       }
 
+      // Show export button if there are failures
+      const btnExport = document.getElementById('btn-export-failed');
+      if (data.failedCount > 0 || data.invalidCount > 0) {
+        btnExport.classList.remove('hidden');
+      } else {
+        btnExport.classList.add('hidden');
+      }
+
       // Render logs
       const logs = document.getElementById('logs');
       logs.innerHTML = '';
@@ -285,6 +294,10 @@
     document.getElementById('btn-pause').onclick = () => fetch(`/api/broadcast/${currentBroadcastId}/pause`, { method: 'POST' });
     document.getElementById('btn-resume').onclick = () => fetch(`/api/broadcast/${currentBroadcastId}/resume`, { method: 'POST' });
     document.getElementById('btn-cancel').onclick = () => fetch(`/api/broadcast/${currentBroadcastId}/cancel`, { method: 'POST' });
+    
+    document.getElementById('btn-export-failed').onclick = () => {
+      window.open(`/api/broadcast/${currentBroadcastId}/export-failed`, '_blank');
+    };
     
     // On load
     loadTemplates();
